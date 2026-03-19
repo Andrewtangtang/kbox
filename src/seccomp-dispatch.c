@@ -86,6 +86,77 @@ static void kbox_lkl_stat_to_host(const struct kbox_lkl_stat *src,
 }
 
 /* ------------------------------------------------------------------ */
+/* Open-flag ABI translation (aarch64 host <-> asm-generic LKL)       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * aarch64 and asm-generic define four O_* flags differently:
+ *
+ *   Flag         aarch64     asm-generic (LKL)
+ *   O_DIRECTORY  0x04000     0x10000
+ *   O_NOFOLLOW   0x08000     0x20000
+ *   O_DIRECT     0x10000     0x04000
+ *   O_LARGEFILE  0x20000     0x08000
+ *
+ * x86_64 values already match asm-generic so no translation is needed there.
+ */
+#if defined(__aarch64__)
+
+#define HOST_O_DIRECTORY 0x04000
+#define HOST_O_NOFOLLOW 0x08000
+#define HOST_O_DIRECT 0x10000
+#define HOST_O_LARGEFILE 0x20000
+
+#define LKL_O_DIRECTORY 0x10000
+#define LKL_O_NOFOLLOW 0x20000
+#define LKL_O_DIRECT 0x04000
+#define LKL_O_LARGEFILE 0x08000
+
+static inline long host_to_lkl_open_flags(long flags)
+{
+    long out = flags & ~(HOST_O_DIRECTORY | HOST_O_NOFOLLOW | HOST_O_DIRECT |
+                         HOST_O_LARGEFILE);
+    if (flags & HOST_O_DIRECTORY)
+        out |= LKL_O_DIRECTORY;
+    if (flags & HOST_O_NOFOLLOW)
+        out |= LKL_O_NOFOLLOW;
+    if (flags & HOST_O_DIRECT)
+        out |= LKL_O_DIRECT;
+    if (flags & HOST_O_LARGEFILE)
+        out |= LKL_O_LARGEFILE;
+    return out;
+}
+
+static inline long lkl_to_host_open_flags(long flags)
+{
+    long out = flags & ~(LKL_O_DIRECTORY | LKL_O_NOFOLLOW | LKL_O_DIRECT |
+                         LKL_O_LARGEFILE);
+    if (flags & LKL_O_DIRECTORY)
+        out |= HOST_O_DIRECTORY;
+    if (flags & LKL_O_NOFOLLOW)
+        out |= HOST_O_NOFOLLOW;
+    if (flags & LKL_O_DIRECT)
+        out |= HOST_O_DIRECT;
+    if (flags & LKL_O_LARGEFILE)
+        out |= HOST_O_LARGEFILE;
+    return out;
+}
+
+#else /* x86_64: flags already match asm-generic */
+
+static inline long host_to_lkl_open_flags(long flags)
+{
+    return flags;
+}
+
+static inline long lkl_to_host_open_flags(long flags)
+{
+    return flags;
+}
+
+#endif
+
+/* ------------------------------------------------------------------ */
 /* Dispatch result constructors                                       */
 /* ------------------------------------------------------------------ */
 
@@ -219,7 +290,7 @@ static struct kbox_dispatch forward_openat(
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
-    long flags = to_c_long_arg(notif->data.args[2]);
+    long flags = host_to_lkl_open_flags(to_c_long_arg(notif->data.args[2]));
     long mode = to_c_long_arg(notif->data.args[3]);
 
     /* Image mode: translate path for LKL. */
@@ -282,6 +353,7 @@ static struct kbox_dispatch forward_openat2(
                                &how);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
+    how.flags = (uint64_t) host_to_lkl_open_flags((long) how.flags);
 
     char translated[KBOX_MAX_PATH];
     rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
@@ -344,7 +416,7 @@ static struct kbox_dispatch forward_open_legacy(
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
-    long flags = to_c_long_arg(notif->data.args[1]);
+    long flags = host_to_lkl_open_flags(to_c_long_arg(notif->data.args[1]));
     long mode = to_c_long_arg(notif->data.args[2]);
 
     char translated[KBOX_MAX_PATH];
@@ -780,7 +852,16 @@ static struct kbox_dispatch forward_fcntl(
         return kbox_dispatch_value((int64_t) new_vfd);
     }
 
+    /* F_SETFL: translate host open flags to LKL before forwarding. */
+    if (cmd == F_SETFL)
+        arg = host_to_lkl_open_flags(arg);
+
     long ret = kbox_lkl_fcntl(ctx->sysnrs, lkl_fd, cmd, arg);
+
+    /* F_GETFL: translate LKL open flags back to host before returning. */
+    if (cmd == F_GETFL && ret >= 0)
+        ret = lkl_to_host_open_flags(ret);
+
     return kbox_dispatch_from_lkl(ret);
 }
 
